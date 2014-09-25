@@ -1,0 +1,93 @@
+xsbench - XenServer Benchmark Suite
+===================================
+ Copyright (c) 2014 Citrix
+
+Disclaimer
+----------
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, version only.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+
+Description
+-----------
+  xsbench is a suite of scripts written to facilitate the deployment of VMs
+  for performance benchmarks. It includes basic benchmarks for single-host
+  storage and network traffic (between VMs).
+
+
+WARNING
+-------
+  THESE SCRIPTS WILL DESTROY YOUR DATA. They will destroy SRs and VMs and
+  overwrite large portions of your host's configuration and disk data. This is
+  NOT TO BE USED IN PRODUCTION ENVIRONMENTS. It is intended for tests only.
+
+
+Usage
+-----
+  1) Edit xsbench.cfg and adjust the parameters to meet your environment.
+  2) Run ./xsbench.sh for a list of available commands.
+
+  The suite operates on top of a base Linux (PV) VM. You should install a
+  standard Linux guest and point the script to this guest's name (as "vm0").
+
+  Once this is done, run:
+  ./xsbench.sh setup
+
+  This will create a pair of SSH keys and instruct your guest to accept
+  commands from dom0 without a password (during this step you will be prompted
+  for a password once). Furthermore, this action will install a set of required
+  tools in dom0 and in your guest.
+
+  Next, you can run:
+  ./xsbench.sh srs_create     # Creates the specified SRs and VDIs for clones
+  ./xsbench.sh clones_create  # Clones your base VM several times as configured
+  ./xsbench.sh vbds_create    # Plugs the extra VDIs to the clones
+  ./xsbench.sh bench_run      # Runs the benchmarks
+
+  At the end of the benchmark, a set of 'gnuplottable' data files will be
+  available for analysis.
+
+
+Known issues and wishlist
+-------------------------
+  The "setup" functionality is not yet implemented. You are required to
+  manually configure a base guest, install synexec, iperf, fio and latency.
+
+  You are also required to configure the SSH keys.
+
+  Path to guest tools (synexec, etc) is currently hard coded.
+
+  The network performance tests are not yet distributed with this suite.
+
+  This suite flushes iptables in dom0. Something more sensible is required.
+
+  The implementation of "vbd_create()" could be better. Currently, it must be
+  ran on halted guests.
+
+  We are almost in a position to use 'fio' on all tests instead of 'latency'.
+  The support for 'latency' could soon be dropped.
+
+  There are still issues with 'fio' and write tests.
+
+  The guest support is limited to Debian/Ubuntu.
+
+  Some functions will only work if the device name in the guest is "xvd_".
+  This is incompatible with HVM Linux guests (device is called "hd_").
+
+  There should be a better way to flip between tapdisk3, blktap2 and other
+  data paths (e.g. qemu-qdisk, blkback).
+
+  Ideally, this benchmark suite should run from a VM.
+
+  Finally, once this suite is placed inside a VM, it should be modified to
+  work with other hypervisors.
+

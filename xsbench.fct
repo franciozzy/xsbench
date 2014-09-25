@@ -1,0 +1,1570 @@
+#!/bin/bash
+#
+#  Copyright 2014 (c) Citrix
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, version only.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+#########
+## Interface Functions
+#####
+
+clones_create(){
+    local vmidx vm_name vm_uuid
+
+    # Ensure that ${vm0} is set and that VM exists
+    fetch_vm_uuid "${vm0}" || return 1
+
+    # Ensure that ${vm0} is halted
+    validate_vm_pwr "${vm_uuid}" "halted" || return 1
+
+    # Ensure ${vms} and ${vmf} are set and that clones don't yet exist
+    validate_no_clones || return 1
+
+    # Create clones
+    xsb_echo 1 "Creating ${vms} clones from VM \"${vm0}\""
+    for ((vmidx=1; vmidx<=${vms}; vmidx++)); do
+        vm_name="$(printf "${vmf}" ${vmidx})"
+        vm_uuid="$(xe vm-clone vm="${vm0}" new-name-label="${vm_name}")"
+        validate_str vm_uuid "noerr" || return 1
+        xsb_echo 2 "* Cloned \"${vm0}\" to \"${vm_name}\" (${vm_uuid})"
+    done
+
+    # Randomise NICs
+    clones_nic_randomise || return 1
+
+    return 0
+}
+
+clones_destroy(){
+    local vmidx vm_name vm_uuid
+
+    # Ensure that ${vm0} is set and that VM exists
+    fetch_vm_uuid "${vm0}" || return 1
+
+    # Ensure that ${vmi}, ${vms} and ${vmf} are set
+    validate_vms || return 1
+
+    # Shutdown running clones
+    clones_shutdown "--force" || return 1
+
+    # Destroy existing clones
+    xsb_echo 1 "Destroying clones..."
+    for ((vmidx=1; vmidx<=${vms}; vmidx++)); do
+        vm_name="$(printf "${vmf}" ${vmidx})"
+        fetch_vm_uuid "${vm_name}" "noerr" || continue
+
+        xsb_echo 2 "* Destroying clone \"${vm_name}\" (${vm_uuid})"
+
+        # Destroy root disk
+        destroy_vm_dev "${vm_uuid}" "xvda" || return 1
+
+        # Destroy clone
+        xe vm-destroy uuid="${vm_uuid}" || return 1
+    done
+
+    return 0
+}
+
+clones_start(){
+    local vmidx vm_name vm_uuid
+    local pididx pid_list pid_uuid
+    local starting
+
+    # Ensure that ${vm0} is set and that VM exists
+    fetch_vm_uuid "${vm0}" || return 1
+
+    # Ensure that ${vmi}, ${vms} and ${vmf} are set
+    validate_vms || return 1
+
+    xsb_echo 1 "Ensuring all clones are running..."
+
+    pididx=0
+    for ((vmidx=1; vmidx<=${vms}; vmidx++)); do
+        pid_list[${pididx}]=
+        pid_uuid[${pididx}]=
+        vm_name="$(printf "${vmf}" ${vmidx})"
+        fetch_vm_uuid "${vm_name}" "noerr" || continue
+        validate_vm_pwr "${vm_uuid}" "halted" "noerr" || continue
+
+        xsb_echo 2 "* Starting clone \"${vm_name}\" (${vm_uuid})"
+
+        xe vm-start uuid="${vm_uuid}" &
+        pid_list[${pididx}]="$!"
+        pid_uuid[${pididx}]="${vm_uuid}"
+        ((pididx++))
+    done
+
+    # Return here if all clones are already running
+    [ ${pididx} -eq 0 ] && return 0
+
+    xsb_echo 1 "Waiting for clones to start..."
+
+    starting="${pididx}"
+    while [ ${starting} -gt 0 ]; do
+        for ((pididx=0; pididx<${vms}; pididx++)); do
+            if [ ! -z "${pid_list[${pididx}]}" ] && [ ${pid_list[${pididx}]} -gt 0 ]; then
+                kill -0 ${pid_list[${pididx}]} 2>/dev/null
+                if [ $? -eq 1 ]; then
+                    fetch_vm_name "${pid_uuid[$pididx]}"
+                    xsb_echo 2 "* Clone \"${vm_name}\" (${pid_uuid[${pididx}]}) is now running"
+                    pid_list[${pididx}]=0
+                    ((starting--))
+                fi
+            fi
+        done
+        sleep 0.5
+    done
+
+    return 0
+}
+
+clones_shutdown(){
+    local vmidx vm_name vm_uuid
+    local pididx pid_list pid_uuid
+    local dying
+
+    # Ensure that ${vm0} is set and the VM exists
+    fetch_vm_uuid "${vm0}" || return 1
+
+    # Ensure that we have ${vmi}, ${vms} and ${vmf}
+    validate_vms || return 1
+
+    xsb_echo 1 "Shutting down clones..."
+
+    pididx=0
+    for ((vmidx=1; vmidx<=${vms}; vmidx++)); do
+        pid_list[${pididx}]=
+        pid_uuid[${pididx}]=
+        vm_name="$(printf "${vmf}" ${vmidx})"
+        fetch_vm_uuid "${vm_name}" "noerr" || continue
+        validate_vm_pwr "${vm_uuid}" "running" "noerr" || continue
+
+        xsb_echo 2 "* Shutting down clone \"${vm_name}\" (${vm_uuid})"
+
+        xe vm-shutdown uuid="${vm_uuid}" $1 &
+        pid_list[${pididx}]="$!"
+        pid_uuid[${pididx}]="${vm_uuid}"
+        ((pididx++))
+    done
+
+    xsb_echo 1 "Waiting for clones to shut down..."
+
+    dying="${pididx}"
+    while [ ${dying} -gt 0 ]; do
+        for ((pididx=0; pididx<${vms}; pididx++)); do
+            if [ ! -z "${pid_list[${pididx}]}" ] && [ ${pid_list[${pididx}]} -gt 0 ]; then
+                kill -0 ${pid_list[${pididx}]} 2>/dev/null
+                if [ $? -eq 1 ]; then
+                    fetch_vm_name "${pid_uuid[$pididx]}"
+                    xsb_echo 2 "* Clone \"${vm_name}\" (${pid_uuid[$pididx]}) is now halted"
+                    pid_list[${pididx}]=0
+                    ((dying--))
+                fi
+            fi
+        done
+        sleep 0.5
+    done
+
+    return 0
+}
+
+srs_create(){
+    # Ensure ${storage} is set
+    validate_str storage || return 1
+
+    # Create NFS SRs
+    if [ "${storage}" == "nfs" ] || [ "${storage}" == "all" ]; then
+        xsb_echo 1 "Creating NFS SRs"
+        nfs_srs_create || return 1
+    fi
+
+    # Create LVM SRs
+    if [ "${storage}" == "lvm" ] || [ "${storage}" == "all" ]; then
+        xsb_echo 1 "Creating LVM SRs"
+        lvm_srs_create || return 1
+    fi
+
+    return 0
+}
+
+srs_destroy(){
+    # Ensure ${storage} is set
+    validate_str storage || return 1
+
+    # Destroy NFS SRs
+    if [ "${storage}" == "nfs" ] || [ "${storage}" == "all" ]; then
+        xsb_echo 1 "Destroying NFS SRs..."
+        nfs_srs_destroy || return 1
+    fi
+
+    # Destroy LVM SRs
+    if [ "${storage}" == "lvm" ] || [ "${storage}" == "all" ]; then
+        xsb_echo 1 "Destroying LVM SRs..."
+        lvm_srs_destroy || return 1
+    fi
+}
+
+vbds_create(){
+    local errors nfs_errors lvm_errors
+    local vmidx vm_name vm_uuid
+    local nfsidx lvmidx
+    local sr_uuid 
+
+    # Ensure SRs exist
+    srs_create || return 1
+
+    # Ensure clones are not running
+    clones_shutdown || return 1
+
+    # Loop through clones, creating VBDs accordingly
+    errors=0
+    nfs_errors=
+    lvm_errors=
+    for ((vmidx=1; vmidx<=${vms}; vmidx++)); do
+        vm_name="$(printf "${vmf}" ${vmidx})"
+        vm_uuid="$(xe vm-list name-label="${vm_name}" --minimal)"
+        xsb_echo 1 "Creating VBDs for VM \"${vm_name}\" - ${vm_uuid}"
+
+        if [ "${storage}" == "nfs" ] || [ "${storage}" == "all" ]; then
+            for ((nfsidx=0; nfsidx<${nfs_count}; nfsidx++)); do
+                sr_uuid="$(xe sr-list name-label="${nfs_name[${nfsidx}]}" --minimal)"
+                if [ -z "${sr_uuid}" ]; then
+                    errors=1
+                    if [ -z "${nfs_errors[${nfsidx}]}" ]; then
+                        nfs_errors[${nfsidx}]="reported"
+                        xsb_echo 3 "* Unable find SR[${nfsidx}] (\"${nfs_name[${nfsidx}]}\") for VBDs creation"
+                    fi
+                    continue
+                fi
+                vbds_create_for_vm "${vm_uuid}" "${sr_uuid}" "${vmidx}"
+            done
+        fi
+        if [ "${storage}" == "lvm" ] || [ "${storage}" == "all" ]; then
+            for ((lvmidx=0; lvmidx<${lvm_count}; lvmidx++)); do
+                sr_uuid="$(xe sr-list name-label="${lvm_name[${lvmidx}]}" --minimal)"
+                if [ -z "${sr_uuid}" ]; then
+                    errors=1
+                    if [ -z "${lvm_errors[${lvmidx}]}" ]; then
+                        lvm_errors[${lvmidx}]="reported"
+                        xsb_echo 3 "* Unable find SR[${lvmidx}] (\"${lvm_name[$lvmidx]}\") for VBDs creation"
+                    fi
+                    continue
+                fi
+                vbds_create_for_vm "${vm_uuid}" "${sr_uuid}" "${vmidx}"
+            done
+        fi
+    done
+
+    return 0
+}
+
+qdisk_plug(){
+    local vdi vdi_uuid vdi_path vdi_list
+    local vmidx vm_name vm_uuid
+    local dom_id
+    local sr_uuid
+    local vbd_uuid backtype
+
+    # Ensure ${storage} is set
+    validate_str storage || return 1
+
+    # Ensure VMs are running
+    clones_start || return 1
+
+    # Get list of VM devices
+    bench_vdi_list || return 1
+    validate_str vdi_list || return 1
+
+    # Cycle through VMs, unplugging VBDs and replugging QDISKs
+    for ((vmidx=1; vmidx<=${vms}; vmidx++)); do
+        vm_name="$(printf "${vmf}" ${vmidx})"
+        vm_uuid="$(xe vm-list name-label="${vm_name}" --minimal)"
+        dom_id="$(xe vm-list uuid="${vm_uuid}" params=dom-id --minimal)"
+        validate_int dom_id || continue
+
+        # Ensure QEMU is running for this guest
+        qemu_pid="$(ps awwux | grep -v grep | egrep "qemu-system-i386.* -xen-domid ${dom_id} " | awk '{print $2}')"
+        if [ -z "${qemu_pid}" ]; then
+            xsb_echo 1 "Starting QEMU for clone \"${vm_name}\""
+            /usr/lib64/xen/bin/qemu-system-i386 -xen-domid ${dom_id} -xen-attach -name "${vm_name}" -daemonize \
+                -nographic -M xenpv -monitor /dev/null -serial /dev/null -parallel /dev/null -pidfile /var/run/qemu-${dom_id}.pid
+        fi
+
+        # Unplug VBDs and plug QDISKs
+        for vdi in ${vdi_list}; do
+            vbd_uuid="$(xe vbd-list vm-uuid=${vm_uuid} device=${vdi} --minimal)"
+            validate_str vbd_uuid || continue
+
+            vdi_uuid="$(xe vbd-list uuid=${vbd_uuid} params=vdi-uuid --minimal)"
+            validate_str vdi_uuid || continue
+
+            sr_uuid="$(xe vdi-list uuid=${vdi_uuid} params=sr-uuid --minimal)"
+            validate_str sr_uuid || continue
+
+            xe vbd-unplug uuid="${vbd_uuid}"
+            if [ $? -ne 0 ]; then
+                xsb_echo 2 "* Error unplugging VBD (${vbd_uuid}) for VM \"${vm_name}\" (${vm_uuid}), device \"${vdi}\""
+                continue
+            fi
+
+            backtype="$(xe sr-list uuid=${sr_uuid} params=type --minimal)"
+            validate_str backtype || continue
+
+            if [ "${backtype}" == "lvm" ]; then
+                dom0_activate_vdi "${sr_uuid}" "${vdi_uuid}"
+            elif [ "${backtype}" == "nfs" ] || [ "${backtype}" == "ext" ]; then
+                vdi_path="/var/run/sr-mount/${sr_uuid}/${vdi_uuid}.raw"
+            else
+                xsb_echo 2 "* Error: unsupported SR type \"${backtype}\""
+                continue
+            fi
+
+            xl block-attach ${dom_id} backendtype=qdisk,vdev=${vdi},format=raw,target=${vdi_path}
+            if [ $? -ne 0 ]; then
+                xsb_echo 2 "* Error plugging QDISK (xl block-attach ${dom_id} backendtype=qdisk,vdev=${vdi},format=raw,target=${vdi_path})"
+                continue
+            fi
+        done
+    done
+
+    return 0
+}
+
+blkbk_plug(){
+    local vdi vdi_uuid vdi_path vdi_list
+    local vmidx vm_name vm_uuid
+    local dom_id
+    local sr_uuid
+    local vbd_uuid backtype
+
+    # Ensure ${storage} is set
+    validate_str storage || return 1
+
+    # Ensure VMs are running
+    clones_start || return 1
+
+    # Get list of VM devices
+    bench_vdi_list || return 1
+    validate_str vdi_list || return 1
+
+    # Cycle through VMs, unplugging VBDs and replugging BLKBACKs
+    for ((vmidx=1; vmidx<=${vms}; vmidx++)); do
+        vm_name="$(printf "${vmf}" ${vmidx})"
+        fetch_vm_uuid "${vm_name}" || return 1
+        dom_id="$(xe vm-list uuid="${vm_uuid}" params=dom-id --minimal)"
+        validate_int dom_id || continue
+
+        # Unplug VBDs and plug BLKBACKs
+        for vdi in ${vdi_list}; do
+
+            fetch_vbd "${vm_uuid}" "${vdi}" || continue
+            validate_str vbd_uuid || continue
+
+            fetch_vdi_from_vbd "${vbd_uuid}" || continue
+            validate_str vdi_uuid || continue
+
+            sr_uuid=$(xe vdi-list uuid="${vdi_uuid}" params=sr-uuid --minimal)
+            validate_str sr_uuid || continue
+
+            xsb_echo 2 "* Unplugging VBD \"${vbd_uuid}\" for VM \"${vm_name}\" (${vm_uuid}), device \"${vdi}\""
+            xe vbd-unplug uuid="${vbd_uuid}"
+            if [ $? -ne 0 ]; then
+                xsb_echo 2 "* Error unplugging VBD (${vbd_uuid}) for VM \"${vm_name}\" (${vm_uuid}), device \"${vdi}\""
+                continue
+            fi
+
+            backtype=$(xe sr-list uuid="${sr_uuid}" params=type --minimal)
+            validate_str backtype || continue
+
+            if [ "${backtype}" == "lvm" ]; then
+                dom0_activate_vdi "${sr_uuid}" "${vdi_uuid}"
+            else
+                xsb_echo 2 "* Error: unsupported SR type \"${backtype}\""
+                continue
+            fi
+
+            xsb_echo 2 "* Replugging VBD via blkback..."
+            xl block-attach ${dom_id} backendtype=phy,vdev=${vdi},format=raw,target=${vdi_path}
+            if [ $? -ne 0 ]; then
+                xsb_echo 2 "* Error plugging BLKBK (xl block-attach ${dom_id} backendtype=phy,vdev=${vdi},format=raw,target=${vdi_path})"
+                continue
+            fi
+        done
+    done
+
+    return 0
+}
+
+dom0_bench_run(){
+    local data_run
+    local devices
+    local vmidx vmidxf subvmidx subvmidxf
+    local blksz blkszf op
+    local fio_conf fioline
+    local pididx pididxf pid_list
+    local jobidx jobidxf
+
+    # Ensure ${storage} is set
+    validate_str storage || return 1
+
+    # Ensure ${vms} and ${vmi} are set
+    validate_vms || return 1
+
+    # We have only implemented block-storage benchmark
+    if [ "${storage}" == "nfs" ] || [ "${storage}" == "all" ]; then
+        xsb_echo 0 "This suite only supports dom0 benchmarking of block-storage at this time"
+        xsb_echo 0 "Please adjust the configuration file to use 'lvm' for 'storage'"
+        return 1
+    fi
+
+    if [ "${using_fio}" != "1" ]; then
+        # Ensure we have latency
+        validate_latency || return 1
+    fi
+
+    # Ensure clones are stopped
+    clones_shutdown || return 1
+
+    # Determine test run name
+    bench_new_run 1 || return 1
+    validate_str data_run || return 1
+
+    # Activate all VDIs locally to dom0
+    dom0_activate_vdis || return 1
+
+    # Assemble 'devices'
+    bench_dev_list
+
+    # Run benchmark threads in dom0 simulating VMs
+    for ((vmidx=${vmi}; vmidx<=${vms}; vmidx++)); do
+        vmidxf="$(printf "%02d" ${vmidx})"
+        mkdir -p "${data_raw}/${vmidxf}"
+
+        for blksz in ${data_blkszs}; do
+            blkszf="$(printf "%07d" ${blksz})"
+
+            for op in ${data_ops}; do
+                [ "${op}" == "w" ] && opc="-w" || opc=""
+                xsb_echo 1 "Benchmarking with ${vmidx} thread(s), op: ${op}, blksz: ${blksz}"
+
+                if [ "${using_fio}" == "1" ]; then
+                    fio_conf="dom0_bench.$$.${vmidxf}.conf"
+                    cat << _EOF_ > "${fio_conf}"
+[global]
+bs=${blksz}
+rw=$( [ "${op}" == "w" ] && echo "write" || echo "read" )
+direct=1
+ioengine=libaio
+iodepth=1
+runtime=${data_iters}
+time_based
+_EOF_
+                fi
+
+                pididx=0
+                jobidx=0
+                for ((subvmidx=1; subvmidx<=${vmidx}; subvmidx++)); do
+                    subvmidxf="$(printf "%02d" ${subvmidx})"
+
+                    pid_list[${pididx}]=
+                    for device in ${devices[${subvmidx}]}; do
+                        pididxf="$(printf "%02d" $[ ${pididx} + 1 ])"
+                        jobidxf="$(printf "%02d" $[ ${jobidx} + 1 ])"
+
+                        if [ "${using_fio}" == "1" ]; then
+                            cat << _EOF_ >> "${fio_conf}"
+
+[job-${jobidxf}]
+filename=${device}
+_EOF_
+                        else
+                            xsb_echo 3 "* Spawning: ${latency} -s -t ${opc} -b ${blksz} ${device} ${data_iters}"
+                            ${latency} -s -t ${opc} -b ${blksz} ${device} ${data_iters} 1>${data_raw}/${vmidxf}/${data_run}.${op}.${blkszf}.${subvmidxf}.${pididxf}.dat 2>&1 &
+                            pid_list[${pididx}]=$!
+                            ((pididx++))
+                        fi
+                        ((jobidx++))
+                    done
+                done
+                if [ "${using_fio}" == "1" ]; then
+                    xsb_echo 3 "* Spawning: ${fio_path} --minimal ${fio_conf}"
+                    ${fio_path} --minimal ${fio_conf} | awk -F';' '{print $6}' 1>/tmp/fio-output.dat 2>&1 &
+                    pid_list[${pididx}]=$!
+                    ((pididx++))
+                fi
+
+                xsb_echo 1 "Waiting for benchmarks to finish..."
+
+                # Wait for latencies to finish
+                for ((pididx--; pididx>=0; pididx--)); do
+                    wait ${pid_list[${pididx}]}
+                done
+
+                # Organise data back to single files
+                fioline=1
+                for ((subvmidx=1; subvmidx<=${vmidx}; subvmidx++)); do
+                    subvmidxf=$(printf "%02d" ${subvmidx})
+                    if [ "${using_fio}" == "1" ]; then
+                        for device in ${devices[$subvmidx]}; do
+                            fioval=$(head -n ${fioline} /tmp/fio-output.dat | tail -1)
+                            echo ${fioval} >> ${data_raw}/${vmidxf}/${data_run}.${op}.${blkszf}.${subvmidxf}.dat
+                            ((fioline++))
+                        done
+                    else
+                        for datafile in ${data_raw}/${vmidxf}/${data_run}.${op}.${blkszf}.${subvmidxf}.*.dat; do
+                            cat ${datafile} >> ${data_raw}/${vmidxf}/${data_run}.${op}.${blkszf}.${subvmidxf}.dat
+                            rm -f ${datafile}
+                        done
+                    fi
+                done
+            done
+        done
+    done
+
+    # Deactivate all VDIs locally in dom0
+    dom0_deactivate_vdis || return 1
+
+    # Process the data
+    bench_proc_data || return 1
+
+    return 0
+}
+
+vms_bench_run(){
+# TODO: Adjust iptables rules sensibly for synexec
+iptables -F INPUT
+
+    local vmidx vmidxf
+    local blksz blkszf op
+    local bench_conf bench_outp
+    local idx idxf
+
+    # Ensure we have synexec_master
+    validate_synexec_master || return 1
+
+    # Ensure clones are started
+    clones_start || return 1
+
+    # Determine test run name
+    bench_new_run 0 || return 1
+    validate_str data_run || return 1
+
+    # Run the benchmark
+    for ((vmidx=${vmi}; vmidx<=${vms}; vmidx++)); do
+        vmidxf="$(printf "%02d" ${vmidx})"
+
+        for blksz in ${data_blkszs}; do
+            blkszf="$(printf "%07d" ${blksz})"
+
+            for op in ${data_ops}; do
+                xsb_echo 1 "Benchmarking ${vmidx} guest(s), op: ${op}, blksz: ${blksz}"
+
+                # Create a job configuration for this run
+                bench_conf="xsbench.jobcfg.$$"
+                bench_new_jobconf "${op}" "${blksz}" "${bench_conf}" || return 1
+
+                # Run benchmark for this configuration
+                bench_outp="xsbench.output.$$"
+                idx=1
+                ${synexec_master} -s "${synexec_session}" "${vmidx}" "${bench_conf}" > "${bench_outp}"
+                cat "${bench_outp}" | awk -F' |:' '/^Slave / {print $2}' | while read slave; do
+                    idxf="$(printf "%02d" ${idx})"
+                    mkdir -p "${data_raw}/${vmidxf}" 2>/dev/null
+                    xsb_echo 2 "* Fetching results ${idxf} from ${slave}"
+                    scp -i "${xsbench_key}" -o StrictHostKeyChecking=no root@${slave}:/tmp/synexec.out /tmp/vm-output.out 1>/dev/null 2>&1
+                    if [ "${using_fio}" == "1" ]; then
+                        awk -F';' '{print $6}' /tmp/vm-output.out > ${data_raw}/${vmidxf}/${data_run}.${op}.${blkszf}.${idxf}.dat
+                        rm -f /tmp/vm-output.out
+                    else
+                        mv /tmp/vm-output.out ${data_raw}/${vmidxf}/${data_run}.${op}.${blkszf}.${idxf}.dat
+                    fi
+                    ((idx++))
+                done
+                rm -f "${bench_outp}" "${bench_conf}"
+            done
+        done
+    done
+
+    # Process the data
+    bench_proc_data
+}
+
+#########
+## Helper Functions
+#####
+
+xsb_echo() {
+    # If ${verbose} is not set, always print
+    if   [ -z "${verbose}" ];   then echo "$2"
+    elif [ ${verbose} -ge $1 ]; then echo "$2"
+    fi
+
+    return 0
+}
+
+xsb_backtrace() {
+    xsb_echo 0 "Backtrace:"
+    i=0
+    while caller ${i}; do
+        i=$((i+1))
+    done
+}
+
+validate_str() {
+    if [ -z "$(eval echo \$$1)" ]; then
+        if [ "$2" != "noerr" ]; then
+            xsb_echo 0 "Unable to proceed. \"\${$1}\" is not set"
+            xsb_backtrace
+        fi
+        return 1
+    fi
+
+    return 0
+}
+
+validate_int() {
+    if ! [[ "$(eval echo \$$1)" =~ ^[0-9]+$ ]]; then
+        if [ "$2" != "noerr" ]; then
+            xsb_echo 0 "Unable to proceed: \"\${$1}\" is not an int."
+            xsb_backtrace
+        fi
+        return 1
+    fi
+
+    return 0
+}
+
+fetch_vm_pwr(){
+    local vm_uuid
+    unset vm_pwr
+
+    # Get input vars
+    vm_uuid="$1"
+    validate_str vm_uuid || return 1
+
+    # Get ${vm_pwr}
+    vm_pwr=$(xe vm-list uuid="${vm_uuid}" params=power-state --minimal)
+    validate_str vm_pwr || return 1
+
+    return 0
+}
+
+fetch_vm_name(){
+    local vm_uuid
+    unset vm_name
+
+    # Get input vars
+    vm_uuid="$1"
+    validate_str vm_uuid || return 1
+
+    # Get ${vm_name}
+    vm_name=$(xe vm-list uuid="${vm_uuid}" params=name-label --minimal)
+    validate_str vm_name || return 1
+
+    return 0
+}
+
+fetch_vbd(){
+    local vm_uuid dev_name
+
+    # Get input vars
+    vm_uuid="$1"
+    dev_name="$2"
+    validate_str vm_uuid || return 1
+    validate_str dev_name || return 1
+
+    # Fetch VBD for specific VM's device
+    vbd_uuid=$(xe vbd-list vm-uuid="${vm_uuid}" device="${dev_name}" --minimal)
+    validate_str vbd_uuid || return 1
+
+    return 0
+}
+
+fetch_vm_uuid(){
+    local vm_name err
+    unset vm_uuid
+
+    # Get input vars
+    vm_name="$1"
+    validate_str vm_name || return 1
+
+    [ "$2" == "noerr" ] && err=noerr
+
+    # Get ${vm_uuid}
+    vm_uuid=$(xe vm-list name-label="${vm_name}" --minimal)
+    validate_str vm_uuid ${err} || return 1
+
+    return 0
+}
+
+fetch_vdi_from_vbd(){
+    local vbd_uuid
+    unset vdi_uuid
+
+    # Get input vars
+    vbd_uuid="$1"
+    validate_str vbd_uuid || return 1
+
+    # Get VDI from VBD
+    vdi_uuid=$(xe vbd-list uuid="${vbd_uuid}" params=vdi-uuid --minimal)
+    validate_str vdi_uuid || return 1
+
+    return 0
+}
+
+validate_build_tools(){
+    local ok_make ok_gcc
+
+    command -v make >/dev/null 2>/dev/null
+    ok_make=$?
+    command -v gcc >/dev/null 2>/dev/null
+    ok_gcc=$?
+    if [ ${ok_make} -ne 0 ] || [ ${ok_gcc} -ne 0 ]; then
+        # Download make and gcc
+        xsb_echo 2 "Installing 'make' and 'gcc'..."
+        yum -q -y --disablerepo=citrix --enablerepo=base,updates,extras install gcc make >/dev/null 2>/dev/null
+        command -v make >/dev/null 2>/dev/null
+        ok_make=$?
+        command -v gcc >/dev/null 2>/dev/null
+        ok_gcc=$?
+        if [ ${ok_make} -ne 0 ] || [ ${ok_gcc} -ne 0 ]; then
+            xsb_echo 0 "Unable to install 'make' and 'gcc'"
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+validate_latency(){
+    # Ensure ${latency} is set
+    validate_str latency || return 1
+
+    # Ensure binary exists
+    if [ ! -x "${latency}" ]; then
+        validate_build_tools || return 1
+
+        # Download latency master package from github
+        xsb_echo 3 "Latency not found at \"${latency}\". Downloading from master repo..."
+        validate_str latency_repo || return 1
+
+        wget -q -O latency-master.zip ${latency_repo}
+        if [ $? -ne 0 ] || [ ! -f "latency-master.zip" ]; then
+            xsb_echo 0 "Error downloading latency package from ${latency_repo}"
+            return 1
+        fi
+
+        # Unzip latency package
+        xsb_echo 2 "Unzipping latency package..."
+        unzip -qq latency-master.zip
+        if [ $? -ne 0 ]; then
+            xsb_echo 0 "Unable to unzip latency-master.zip"
+            return 1
+        fi
+
+        # Compile latency
+        cd latency-master
+        make -s -f Makefile 1>/dev/null 2>/dev/null
+        if [ -x "latency" ]; then
+            mv latency ${latency}
+        fi
+        cd - >/dev/null 2>/dev/null
+        rm -rf latency-master.zip latency-master
+
+        # Test it exists now
+        if [ ! -x "${latency}" ]; then
+            xsb_echo 0 "Unable to compile latency binary"
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+validate_fio(){
+    # Ensure ${fio_path} is set
+    validate_str fio_path || return 1
+
+    # Ensure binary exists
+    if [ ! -x "${fio_path}" ]; then
+        validate_build_tools || return 1
+
+        # Download 'fio' master archive from github
+        xsb_echo 3 "Flexible I/O not found at \"${fio_path}\". Downloading..."
+        validate_str fio_repo || return 1
+
+        wget -q -O fio-master.zip ${fio_repo}
+        if [ $? -ne 0 ] || [ ! -f "fio-master.zip" ]; then
+            xsb_echo 0 "Error downloading 'fio' from ${fio_repo}"
+            return 1
+        fi
+
+        # Unzip 'fio' archive
+        xsb_echo 2 "Unzipping 'fio' archive..."
+        unzip -qq fio-master.zip
+        if [ $? -ne 0 ]; then
+            xsb_echo 0 "Unable to unzip fio-master.zip"
+            return 1
+        fi
+
+        # Compile 'fio'
+        cd fio-master
+        make -s -f Makefile 1>/dev/null 2>/dev/null
+        if [ -x "fio" ]; then
+            mv fio ${fio_path}
+        fi
+        cd - >/dev/null 2>/dev/null
+        rm -rf fio-master.zip fio-master
+
+        # Test it exists now
+        if [ ! -x "${fio_path}" ]; then
+            xsb_echo 0 "Unable to compile 'fio'"
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+validate_synexec_master(){
+    # Ensure that ${synexec_master} is set
+    validate_str synexec_master || return 1
+
+    # Ensure binary exists
+    if [ ! -x "${synexec_master}" ]; then
+
+        # Ensure build tools exist
+        validate_build_tools || return 1
+
+        # Download synexec master package from github
+        xsb_echo 3 "Synexec master binary not found at \"${synexec_master}\". Downloading from master repo..."
+        validate_str synexec_repo || return 1
+
+        wget -q -O synexec-master.zip ${synexec_repo}
+        if [ $? -ne 0 ] || [ ! -f "synexec-master.zip" ]; then
+            xsb_echo 0 "Error downloading synexec package from ${synexec_repo}"
+            return 1
+        fi
+
+        # Unzip synexec package
+        xsb_echo 2 "Unzipping synexec package..."
+        unzip -qq synexec-master.zip
+        if [ $? -ne 0 ]; then
+            xsb_echo 0 "Unable to unzip synexec-master.zip"
+            return 1
+        fi
+
+        # Compile synexec
+        cd synexec-master
+        make -s -f Makefile.master 1>/dev/null 2>/dev/null
+        if [ -x "synexec_master" ]; then
+            mv synexec_master ${synexec_master}
+        fi
+        cd - >/dev/null 2>/dev/null
+        rm -rf synexec-master.zip synexec-master
+
+        # Test it exists now
+        if [ ! -x "${synexec_master}" ]; then
+            xsb_echo 0 "Unable to compile synexec master binary"
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+validate_vm_pwr(){
+    local vm_uuid pwr_state
+
+    # Get input vars
+    vm_uuid="$1"
+    pwr_state="$2"
+    validate_str vm_uuid || return 1
+    validate_str pwr_state || return 1
+
+    [ "$3" == "noerr" ] && err=0 || err=1
+
+    # Ensure the VM's power state is as expected
+    fetch_vm_pwr "${vm_uuid}" || return 1
+    if [ "${vm_pwr}" != "${pwr_state}" ]; then
+        if [ ${err} -eq 1 ]; then
+            fetch_vm_name "${vm_uuid}" || return 1
+            xsb_echo 0 "Power state of VM \"${vm_name}\" (${vm_uuid}) is not \"${pwr_state}\""
+        fi
+        return 1
+    fi
+
+    return 0
+}
+
+validate_vms(){
+    # Ensure that ${vmi} is properly set
+    validate_int vmi || return 1
+
+    # Ensure that ${vms} is properly set
+    validate_int vms || return 1
+
+    # Ensure that ${vmf} is properly set
+    validate_str vmf || return 1
+
+    return 0
+}
+
+validate_no_clones(){
+    local vmidx vm_name
+
+    # Ensure that we have ${vmi}, ${vms} and ${vmf}
+    validate_vms || return 1
+
+    # If a clone already exists, return 1
+    for ((vmidx=1; vmidx<=${vms}; vmidx++)); do
+        vm_name="$(printf "${vmf}" ${vmidx})"
+        fetch_vm_uuid "${vm_name}" "noerr" && return 1
+    done
+
+    return 0
+}
+
+vdis_create(){
+    local nfsidx lvmidx
+    local sr_name sr_uuid
+
+    # Ensure ${storage} is set and SRs exist
+    srs_create || return 1
+
+    # Create VDIs for NFS SRs
+    if [ "${storage}" == "nfs" ] || [ "${storage}" == "all" ]; then
+        for ((nfsidx=0; nfsidx<${nfs_count}; nfsidx++)); do
+            sr_name="${nfs_name[$nfsidx]}"
+            sr_uuid="$(xe sr-list name-label="${sr_name}" --minimal)"
+            vdis_create_for_sr "${sr_uuid}"
+        done
+    fi
+
+    # Create VDIs for LVM SRs
+    if [ "${storage}" == "lvm" ] || [ "${storage}" == "all" ]; then
+        for ((lvmidx=0; lvmidx<${lvm_count}; lvmidx++)); do
+            sr_name="${lvm_name[$lvmidx]}"
+            sr_uuid="$(xe sr-list name-label="${sr_name}" --minimal)"
+            vdis_create_for_sr "${sr_uuid}"
+        done
+    fi
+}
+
+destroy_vm_dev(){
+    local vm_uuid dev_name
+    unset vbd_uuid vdi_uuid
+
+    # Get input vars
+    vm_uuid="$1"
+    dev_name="$2"
+    validate_str vm_uuid || return 1
+    validate_str dev_name || return 1
+
+    # Get VBD for specific device
+    fetch_vbd "${vm_uuid}" "${dev_name}" || return 1
+
+    # Get VDI for specific VBD
+    fetch_vdi_from_vbd "${vbd_uuid}" || return 1
+
+    xsb_echo 3 "*** Destroying VBD (${vbd_uuid})"
+    xe vbd-destroy uuid="${vbd_uuid}"
+
+    xsb_echo 3 "*** Destroying VDI (${vdi_uuid}) for \"${dev_name}\""
+    xe vdi-destroy uuid="${vdi_uuid}"
+
+    return 0
+}
+
+vdis_create_for_sr(){
+    local sr_uuid sr_name
+    local vdiidx vdiidxf
+    local vdi_name vdi_uuid
+
+    # Get input vars
+    sr_uuid=$1
+    validate_str sr_uuid || return 1
+
+    sr_name=$(xe sr-list uuid=${sr_uuid} params=name-label --minimal)
+    validate_str sr_name || return 1
+
+    xsb_echo 1 "Creating VDIs for SR \"${sr_name}\" (${sr_uuid})"
+    for ((vdiidx=1; vdiidx<=${vms}; vdiidx++)); do
+        vdiidxf="$(printf "%02d" ${vdiidx})"
+        vdi_name="vdi - ${sr_name} - ${vdiidxf}"
+        vdi_uuid="$(xe vdi-list name-label="${vdi_name}" --minimal)"
+        if [ -z "${vdi_uuid}" ]; then
+            vdi_uuid="$(xe vdi-create sr-uuid=${sr_uuid} sm-config:type=raw \
+                        virtual-size=10GiB name-label="${vdi_name}" type=user)"
+            validate_str vdi_uuid || return 1
+
+            xsb_echo 2 "* Created VDI \"${vdi_name}\" (${vdi_uuid})"
+        fi
+    done
+}
+
+vdis_destroy(){
+    local sr_uuid sr_name
+    local vdi_list vdi_uuid
+
+    # Get input vars
+    sr_uuid=$1
+    validate_str sr_uuid || return 1
+
+    sr_name=$(xe sr-list uuid=${sr_uuid} params=name-label --minimal)
+    validate_str sr_name || return 1
+
+    xsb_echo 1 "Destroying VDIs for SR \"${sr_name}\" (${sr_uuid})"
+    vdi_list="$(xe vdi-list sr-uuid=${sr_uuid} --minimal)"
+    IFS=","
+    for vdi_uuid in ${vdi_list}; do
+        vdi_name=$(xe vdi-list params=name-label uuid="${vdi_uuid}" --minimal)
+        validate_str vdi_name || return 1
+
+        xsb_echo 2 "* Destroying VDI \"${vdi_name}\" (${vdi_uuid})"
+        xe vdi-destroy uuid="${vdi_uuid}"
+    done
+    IFS=
+}
+
+sr_destroy(){
+    local sr_uuid sr_name
+    local pbd_uuid
+
+    # Get input vars
+    sr_uuid=$1
+    validate_str sr_uuid || return 1
+
+    sr_name=$(xe sr-list uuid="${sr_uuid}" params=name-label --minimal)
+    validate_str sr_name || return 1
+
+    pbd_uuid=$(xe pbd-list sr-uuid="${sr_uuid}" --minimal)
+    validate_str pbd_uuid || return 1
+
+    xsb_echo 2 "Unplugging PBD ${pbd_uuid} for SR \"${sr_name}\" (${sr_uuid})"
+    xe pbd-unplug uuid=${pbd_uuid}
+
+    xsb_echo 1 "Destroying SR \"${sr_name}\" (${sr_uuid})"
+    xe sr-destroy uuid=${sr_uuid}
+}
+
+nfs_srs_create(){
+    local nfsidx
+    local sr_name sr_uuid
+
+    # Create NFS SRs that are not there
+    for ((nfsidx=0; nfsidx<=${nfs_count}; nfsidx++)); do
+        sr_name="${nfs_name[$nfsidx]}"
+        sr_uuid="$(xe sr-list name-label="${sr_name}" --minimal)"
+        if [ -z "${sr_uuid}" ]; then
+            sr_uuid="$(xe sr-create name-label="${nfs_name[$nfsidx]}" \
+                       device-config:server=${nfs_serv[$nfsidx]} type=nfs \
+                       device-config:serverpath="${nfs_path[$nfsidx]}")"
+            validate_str sr_uuid || return 1
+            xsb_echo 2 "* Created NFS SR \"${sr_name}\" (${sr_uuid}) on " \
+                       "${nfs_srv[$nfsidx]}:${nfs_path[$nfsidx]}"
+        fi
+    done
+
+    return 0
+}
+
+lvm_srs_create(){
+    local lvmidx
+    local sr_name sr_uuid
+
+    # Create LVM SRs that are not there
+    for ((lvmidx=0; lvmidx<${lvm_count}; lvmidx++)); do
+        sr_name="${lvm_name[$lvmidx]}"
+        sr_uuid="$(xe sr-list name-label="${sr_name}" --minimal)"
+        if [ -z "${sr_uuid}" ]; then
+            sr_uuid="$(xe sr-create name-label="${sr_name}" type=lvm \
+                       device-config:device="${lvm_bdev[$lvmidx]}")"
+            validate_str sr_uuid || return 1
+            xsb_echo 2 "* Created LVM SR \"${sr_name}\" (${sr_uuid}) on " \
+                       "${lvm_bdev[$lvmidx]}"
+        fi
+    done
+
+    return 0
+}
+
+nfs_srs_destroy(){
+    local nfsidx
+    local sr_uuid
+
+    # Destroy NFS SRs
+    for ((nfsidx=0; nfsidx<${nfs_count}; nfsidx++)); do
+        sr_uuid=$(xe sr-list name-label="${nfs_name[$nfsidx]}" --minimal)
+        [ -z "${sr_uuid}" ] && continue
+        vdis_destroy "${sr_uuid}"
+        sr_destroy "${sr_uuid}"
+        xsb_echo 2 "* Destroyed NFS SR \"${nfs_name[$nfsidx]}\" (${sr_uuid})"
+    done
+}
+
+lvm_srs_destroy(){
+    local lvmidx
+    local sr_uuid
+
+    # Destroy LVM SRs
+    for ((lvmidx=0; lvmidx<${lvm_count}; lvmidx++)); do
+        sr_uuid=$(xe sr-list name-label="${lvm_name[${lvmidx}]}" --minimal)
+        [ -z "${sr_uuid}" ] && continue
+        vdis_destroy "${sr_uuid}"
+        sr_destroy "${sr_uuid}"
+        xsb_echo 2 "* Destroyed LVM SR \"${lvm_name[$lvmidx]}\" (${sr_uuid})"
+    done
+}
+
+vbds_create_for_vm(){
+    local vmidx vmidxf
+    local sr_uuid sr_name
+    local vm_uuid
+    local vdi_uuid vdi_name
+    local vbd_uuid
+
+    # Get input vars
+    vm_uuid=$1
+    sr_uuid=$2
+    vmidx=$3
+    validate_str vm_uuid || return 1
+    validate_str sr_uuid || return 1
+    validate_str vmidx || return 1
+
+    sr_name="$(xe sr-list uuid=${sr_uuid} params=name-label --minimal)"
+    validate_str sr_name || return 1
+    vmidxf="$(printf "%02d" ${vmidx})"
+
+    vdi_name="vdi - ${sr_name} - ${vmidxf}"
+    vdi_uuid="$(xe vdi-list name-label="${vdi_name}" --minimal)"
+    vbd_uuid="$(xe vbd-create vdi-uuid="${vdi_uuid}" vm-uuid="${vm_uuid}" \
+                device=autodetect)"
+    xsb_echo 2 "* Created VBD ${vbd_uuid}"
+
+# XXX: Hack to use blkback+blktap2+tapdisk2 instead
+#xe vbd-param-set uuid="${vbd_uuid}" other-config:backend-kind=vbd
+}
+
+nfs_vbds_create(){
+    local vm_uuid vm_name
+    local vmidx nfsidx
+    local sr_uuid
+
+    # Get input vars
+    vm_uuid=$1
+    vm_name=$2
+    vmidx=$3
+    validate_str vm_uuid || return 1
+    validate_str vm_name || return 1
+    validate_str vmidx || return 1
+
+    # Iterate through NFS SRs
+    for ((nfsidx=0; nfsidx<${nfs_count}; nfsidx++)); do
+        sr_uuid=$(xe sr-list name-label="${nfs_name[$nfsidx]}" --minimal)
+        vbds_create_for_vm "${vm_uuid}" "${sr_uuid}" "${vmidx}"
+    done
+}
+
+lvm_vbds_create(){
+    local vm_uuid vm_name
+    local vmidx lvmidx
+    local sr_uuid
+
+    # Get input vars
+    vm_uuid=$1
+    vm_name=$2
+    vmidx=$3
+    validate_str vm_uuid || return 1
+    validate_str vm_name || return 1
+    validate_str vmidx || return 1
+
+    # Iterate through LVM SRs
+    for ((lvmidx=0; lvmidx<${lvm_count}; lvmidx++)); do
+        sr_uuid=$(xe sr-list name-label="${lvm_name[$lvmidx]}" --minimal)
+        vbds_create_for_vm "${vm_uuid}" "${sr_uuid}" "${vmidx}"
+    done
+}
+
+bench_proc_data(){
+    local slave slavef
+    local in out
+    local op blksz blkszf
+    local sum lsum value
+    local idx idxf
+
+    # Ensure we know where to collect data from
+    validate_str data_raw || return 1
+    if [ ! -d "${data_raw}" ]; then
+        xsb_echo 0 "Unable to proceed. Invalid input directory (${data_raw})."
+        return 1
+    fi
+
+    # Ensure we know where to place data
+    validate_str data_proc || return 1
+    if [ ! -d "${data_proc}" ]; then
+        mkdir -p "${data_proc}" 2>/dev/null
+        if [ $? -eq 1 ]; then
+            xsb_echo 0 "Unable to create output data directory (${data_proc})."
+            return 1
+        fi
+    fi
+
+    # Ensure we know the name of the runs
+    validate_str data_runs || return 1
+    if [ ! -r "${data_runs}" ]; then
+        xsb_echo 0 "Unable to proceed. Unable to read file (${data_runs})."
+        return 1
+    fi
+
+    # Process each test run
+    cat "${data_runs}" | while read run; do
+        for op in ${data_ops}; do
+            for ((slave=1; slave<=${vms}; slave++)); do
+                slavef=$(printf "%02d" ${slave})
+                out="${data_proc}/${run}.${op}.${slavef}.dat"
+                [ -f "${out}" ] && xsb_echo 3 "Skipping output ${out}: " \
+                                              "already exists and not I'm " \
+                                              "not overwriting" && continue
+
+                for blksz in ${data_blkszs}; do
+                    blkszf=$(printf "%07d" ${blksz})
+
+                    sum=0
+                    for ((idx=1; idx<=${slave}; idx++)); do
+                        idxf=$(printf "%02d" ${idx})
+                        in="${data_raw}/${slavef}/${run}.${op}.${blkszf}.${idxf}.dat"
+                        [ ! -f "${in}" ] && xsb_echo 3 "Skipping non-file " \
+                                                       "entry ${in}" && continue
+
+                        xsb_echo 2 "Processing ${in}"
+                        lsum=0
+                        while read value; do
+                            [ ! -z "${value}" ] && lsum=$(echo "${lsum} + ${value}" | bc -l)
+                        done < ${in}
+                        sum=$(echo "${sum} + (${lsum} / ${data_iters})" | bc -l)
+                    done
+                    echo "${blksz} ${sum}" >> "${out}"
+                done
+            done
+        done
+    done
+}
+
+bench_vdi_get_devices(){
+    local vm_uuid
+    local sr_name
+    local vdi_name vdi_uuid
+    local vbd_uuid vbd_dev
+    unset vdi_list
+
+    # Get input vars
+    vm_uuid=$1
+    sr_name=$2
+    validate_str vm_uuid || return 1
+    validate_str sr_name || return 1
+
+    vdi_name="vdi - ${sr_name} - 01"
+    vdi_uuid="$(xe vdi-list name-label="${vdi_name}" --minimal)"
+    validate_str vdi_uuid || return 1
+
+    # NOTE: The below could be done in a single step, but because this is error
+    #       prone (e.g. 'device' might not be set in the VBD), it is better to
+    #       do it in two steps to clarify the error if something went wrong
+    vbd_uuid=$(xe vbd-list vm-uuid="${vm_uuid}" vdi-uuid="${vdi_uuid}" --minimal)
+    validate_str vbd_uuid || return 1
+
+    vbd_dev=$(xe vbd-list uuid="${vbd_uuid}" params=device --minimal)
+    validate_str vbd_dev || return 1
+
+    vdi_list="${vdi_list} ${vbd_dev}"
+
+    return 0
+}
+
+bench_vdi_list(){
+    local vm_name vm_uuid
+    local nfsidx lvmidx
+    local sr_name
+    unset vdi_list
+
+    # Ensure ${storage} is set
+    validate_str storage || return 1
+
+    # Generate a list of virtual devices for the VMs using the first clone
+    vm_name=$(printf "${vmf}" 1)
+    vm_uuid=$(xe vm-list name-label="${vm_name}" --minimal)
+    validate_str vm_uuid || return 1
+
+    # Grab device names for NFS VDIs
+    if [ "${storage}" == "nfs" ] || [ "${storage}" == "all" ]; then
+        for ((nfsidx=0; nfsidx<${nfs_count}; nfsidx++)); do
+            sr_name="${nfs_name[$nfsidx]}"
+            bench_vdi_get_devices "${vm_uuid}" "${sr_name}" || return 1
+        done
+    fi
+
+    # Grab device names for LVM VDIs
+    if [ "${storage}" == "lvm" ] || [ "${storage}" == "all" ]; then
+        for ((lvmidx=0; lvmidx<${lvm_count}; lvmidx++)); do
+            sr_name="${lvm_name[$lvmidx]}"
+            bench_vdi_get_devices "${vm_uuid}" "${sr_name}" || return 1
+        done
+    fi
+
+    return 0
+}
+
+bench_dev_list(){
+    local lvmidx
+    local sr_name sr_uuid
+    local vmidx vmidxf
+    unset devices
+
+    # Validate global vars
+    validate_vms || return 1
+
+    # Iterate through SRs generating 'devices' list
+    for ((lvmidx=0; lvmidx<${lvm_count}; lvmidx++)); do
+        sr_name="${lvm_name[$lvmidx]}"
+        sr_uuid="$(xe sr-list name-label="${sr_name}" --minimal)"
+        for ((vmidx=1; vmidx<=${vms}; vmidx++)); do
+            vmidxf="$(printf "%02d" ${vmidx})"
+            vdi_name="vdi - ${sr_name} - ${vmidxf}"
+            vdi_uuid="$(xe vdi-list name-label="${vdi_name}" --minimal)"
+            devices[${vmidx}]="${devices[$vmidx]} /dev/VG_XenStorage-${sr_uuid}/LV-${vdi_uuid}"
+        done
+    done
+}
+
+bench_new_jobconf(){
+    local op blksz conf
+    unset vdi_list
+
+    # Get input vars
+    op=$1
+    blksz=$2
+    conf=$3
+    validate_str op || return 1
+    validate_str blksz || return 1
+    validate_str conf || return 1
+
+    # Get list of benchmark devices
+    bench_vdi_list || return 1
+    validate_str vdi_list || return 1
+
+    # Generate synexec job configuration file
+    if [ "${using_fio}" == "1" ]; then
+        cat << _EOF_ > ${conf}
+/usr/bin/fio --minimal :CONF:
+[global]
+bs=${blksz}
+rw=$( [ "${op}" == "w" ] && echo "write" || echo "read" )
+direct=1
+ioengine=libaio
+iodepth=1
+runtime=${data_iters}
+time_based
+_EOF_
+        for vdi in ${vdi_list}; do
+            cat << _EOF_ >> ${conf}
+
+[job-${vdi}]
+filename=/dev/${vdi}
+_EOF_
+        done
+    else
+        [ "${op}" == "w" ] && opc="-w" || opc=""
+        cat << _EOF_ > ${conf}
+/bin/bash :CONF:
+#!/bin/bash
+vdis="${vdi_list}"
+
+# Set schedulers to NOOP
+for vdi in \${vdis}; do
+  echo noop > /sys/block/\${vdi}/queue/scheduler
+done
+
+# Start latency for each disk at the same time
+pididx=0
+for vdi in \${vdis}; do
+  /root/latency/latency -s -t ${opc} -b ${blksz} /dev/\${vdi} ${data_iters} 1>/tmp/latency.\${vdi} 2>&1 &
+  pid[\${pididx}]=\$!
+  ((pididx++))
+done
+
+# Wait for latencies to finish
+for ((idx=0; idx<\${pididx}; idx++)); do
+  wait \${pid[\$idx]}
+done
+
+# Check each latency results
+for vdi in \${vdis}; do
+  val=\$(cat /tmp/latency.\${vdi})
+  re='^[0-9]+$'
+  if [[ "\${val}" =~ \$re ]]; then
+    echo \${val}
+  else
+    echo "Latency failed for op='${op}', blksz='${blksz}', iters=${data_iters}, dev='\${vdi}', val='\${val}'"
+  fi
+done
+_EOF_
+
+    fi
+
+    return 0
+}
+
+bench_new_run(){
+    local dom0
+    local extra
+    unset data_run
+
+    # Decide whether benchmarking dom0 or vms
+    dom0=$1
+    validate_str dom0 || return 1
+
+    # Ensure test run name file is writable
+    validate_str data_runs || return 1
+    if [ ! -w "${data_runs}" ]; then
+        touch "${data_runs}" 2>/dev/null
+        if [ $? -ne 0 ]; then
+            xsb_echo 0 "Unable to write to test run file (${data_runs})"
+            return 1
+        fi
+    fi
+
+    # Find a suitable name for this test run
+    extra=0
+    [ ${dom0} -eq 1 ] && data_run="${data_base_dom0}" || data_run="${data_base_vms}"
+    while [ ! -z "$(grep "^${data_run}$" "${data_runs}")" ]; do
+        ((extra++))
+        [ ${dom0} -eq 1 ] && data_run="${data_base_dom0}_${extra}" || data_run="${data_base_vms}_${extra}"
+    done
+
+    xsb_echo 3 "Using \${data_run}: ${data_run}"
+    echo "${data_run}" >> ${data_runs}
+
+    return 0
+}
+
+dom0_activate_vdi(){
+    local sr_uuid
+    local vdi_uuid vdi_path
+
+    # Get input vars
+    sr_uuid=$1
+    vdi_uuid=$2
+    validate_str sr_uuid || return 1
+    validate_str vdi_uuid || return 1
+
+    # Determine path and activate VDI
+    vdi_path="/dev/VG_XenStorage-${sr_uuid}/LV-${vdi_uuid}"
+    xsb_echo 2 "* Activating \"${vdi_path}\""
+    lvchange -ay "${vdi_path}"
+}
+
+dom0_deactivate_vdi(){
+    local sr_uuid
+    local vdi_uuid vdi_path
+
+    # Get input vars
+    sr_uuid=$1
+    vdi_uuid=$2
+    validate_str sr_uuid || return 1
+    validate_str vdi_uuid || return 1
+
+    # Determine path and deactivate VDI
+    vdi_path="/dev/VG_XenStorage-${sr_uuid}/LV-${vdi_uuid}"
+    xsb_echo 2 "* Deactivating \"${vdi_path}\""
+    lvchange -an "${vdi_path}"
+}
+
+dom0_activate_vdis(){
+    local lvmidx
+    local sr_name sr_uuid
+    local vdiidx vdiidxf
+    local vdi_name vdi_uuid
+
+    # Validate global vars
+    validate_int lvm_count || return 1
+    validate_vms || return 1
+
+    xsb_echo 1 "Activating logical volume for VDIs in all LVM SRs"
+
+    # Activate logical volume for VDIs in all LVM SRs
+    for ((lvmidx=0; lvmidx<${lvm_count}; lvmidx++)); do
+        sr_name="${lvm_name[${lvmidx}]}"
+        sr_uuid="$(xe sr-list name-label="${sr_name}" --minimal)"
+        validate_str sr_uuid || return 1
+
+        for ((vdiidx=1; vdiidx<=${vms}; vdiidx++)); do
+            vdiidxf="$(printf "%02d" ${vdiidx})"
+            vdi_name="vdi - ${sr_name} - ${vdiidxf}"
+            vdi_uuid="$(xe vdi-list name-label="${vdi_name}" --minimal)"
+            validate_str vdi_uuid || return 1
+            dom0_activate_vdi "${sr_uuid}" "${vdi_uuid}"
+        done
+    done
+
+    return 0
+}
+
+dom0_deactivate_vdis(){
+    local lvmidx
+    local sr_name sr_uuid
+    local vdiidx vdiidxf
+    local vdi_name vdi_uuid vdi_path
+
+    xsb_echo 1 "Deactivating logical volume for VDIs in all LVM SRs"
+
+    # Deactivate logical volume for VDIs in all LVM SRs
+    for ((lvmidx=0; lvmidx<${lvm_count}; lvmidx++)); do
+        sr_name=${lvm_name[$lvmidx]}
+        sr_uuid=$(xe sr-list name-label="${sr_name}" --minimal)
+        validate_str sr_uuid || return 1
+
+        for ((vdiidx=1; vdiidx<=${vms}; vdiidx++)); do
+            vdiidxf=$(printf "%02d" ${vdiidx})
+            vdi_name="vdi - ${sr_name} - ${vdiidxf}"
+            vdi_uuid=$(xe vdi-list name-label="${vdi_name}" --minimal)
+            validate_str vdi_uuid || return 1
+            dom0_deactivate_vdi "${sr_uuid}" "${vdi_uuid}"
+        done
+    done
+
+    return 0
+}
+
+clones_nic_randomise(){
+    local vmidx vm_name vm_uuid
+    local vif_uuid net_uuid mac
+
+    for ((vmidx=1; vmidx<=${vms}; vmidx++)); do
+        vm_name="$(printf "${vmf}" ${vmidx})"
+        vm_uuid="$(xe vm-list name-label="${vm_name}" --minimal)"
+        vif_uuid="$(xe vif-list vm-uuid=${vm_uuid} --minimal)"
+        net_uuid="$(xe vif-list uuid=${vif_uuid} params=network-uuid --minimal)"
+        [ -z "${net_uuid}" ] && echo "Couldn't find VIF/NET for VM \"${vm_name}\"" && continue
+        xe vif-destroy uuid=${vif_uuid}
+        mac="96"
+        for ((o=2; o<=6; o++)); do
+            mac="${mac}:$(printf "%02X" $[ $[ $RANDOM % 254 ] + 1 ])"
+        done
+        vif_uuid="$(xe vif-create device=0 network-uuid=${net_uuid} vm-uuid=${vm_uuid} mac=${mac})"
+        validate_str vif_uuid || return 1
+        echo "New VIF created for VM \"${vm_name}\" (${vif_uuid}) with MAC \"${mac}\""
+    done
+
+    return 0
+}
