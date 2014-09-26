@@ -584,7 +584,7 @@ iptables -F INPUT
                     xsb_echo 2 "* Fetching results ${idxf} from ${slave}"
                     scp -i "${xsbench_key}" -o StrictHostKeyChecking=no root@${slave}:/tmp/synexec.out /tmp/vm-output.out 1>/dev/null 2>&1
                     if [ "${using_fio}" == "1" ]; then
-                        awk -F';' '{print $6}' /tmp/vm-output.out > ${data_raw}/${vmidxf}/${data_run}.${op}.${blkszf}.${idxf}.dat
+                        awk -F';' '{print $6+$47}' /tmp/vm-output.out > ${data_raw}/${vmidxf}/${data_run}.${op}.${blkszf}.${idxf}.dat
                         rm -f /tmp/vm-output.out
                     else
                         mv /tmp/vm-output.out ${data_raw}/${vmidxf}/${data_run}.${op}.${blkszf}.${idxf}.dat

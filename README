@@ -76,8 +76,6 @@ Known issues and wishlist
   We are almost in a position to use 'fio' on all tests instead of 'latency'.
   The support for 'latency' could soon be dropped.
 
-  There are still issues with 'fio' and write tests.
-
   The guest support is limited to Debian/Ubuntu.
 
   Some functions will only work if the device name in the guest is "xvd_".
