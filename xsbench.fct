@@ -394,6 +394,7 @@ blkbk_plug(){
             fi
 
             xsb_echo 2 "* Replugging VBD via blkback..."
+            vdi_path="/dev/VG_XenStorage-${sr_uuid}/LV-${vdi_uuid}"
             xl block-attach ${dom_id} backendtype=phy,vdev=${vdi},format=raw,target=${vdi_path}
             if [ $? -ne 0 ]; then
                 xsb_echo 2 "* Error plugging BLKBK (xl block-attach ${dom_id} backendtype=phy,vdev=${vdi},format=raw,target=${vdi_path})"
