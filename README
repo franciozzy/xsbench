@@ -87,3 +87,4 @@ Known issues and wishlist
   Finally, once this suite is placed inside a VM, it should be modified to
   work with other hypervisors.
 
+  It would be goot to have a './xsbench clean' to clean up the working dir.
