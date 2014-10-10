@@ -425,11 +425,6 @@ dom0_bench_run(){
         return 1
     fi
 
-    if [ "${using_fio}" != "1" ]; then
-        # Ensure we have latency
-        validate_latency || return 1
-    fi
-
     # Ensure clones are stopped
     clones_shutdown || return 1
 
@@ -455,9 +450,8 @@ dom0_bench_run(){
                 [ "${op}" == "w" ] && opc="-w" || opc=""
                 xsb_echo 1 "Benchmarking with ${vmidx} thread(s), op: ${op}, blksz: ${blksz}"
 
-                if [ "${using_fio}" == "1" ]; then
-                    fio_conf="dom0_bench.$$.${vmidxf}.conf"
-                    cat << _EOF_ > "${fio_conf}"
+                fio_conf="dom0_bench.$$.${vmidxf}.conf"
+                cat << _EOF_ > "${fio_conf}"
 [global]
 bs=${blksz}
 rw=$( [ "${op}" == "w" ] && echo "write" || echo "read" )
@@ -467,7 +461,6 @@ iodepth=1
 runtime=${data_iters}
 time_based
 _EOF_
-                fi
 
                 pididx=0
                 jobidx=0
@@ -479,27 +472,18 @@ _EOF_
                         pididxf="$(printf "%02d" $[ ${pididx} + 1 ])"
                         jobidxf="$(printf "%02d" $[ ${jobidx} + 1 ])"
 
-                        if [ "${using_fio}" == "1" ]; then
-                            cat << _EOF_ >> "${fio_conf}"
+                        cat << _EOF_ >> "${fio_conf}"
 
 [job-${jobidxf}]
 filename=${device}
 _EOF_
-                        else
-                            xsb_echo 3 "* Spawning: ${latency} -s -t ${opc} -b ${blksz} ${device} ${data_iters}"
-                            ${latency} -s -t ${opc} -b ${blksz} ${device} ${data_iters} 1>${data_raw}/${vmidxf}/${data_run}.${op}.${blkszf}.${subvmidxf}.${pididxf}.dat 2>&1 &
-                            pid_list[${pididx}]=$!
-                            ((pididx++))
-                        fi
                         ((jobidx++))
                     done
                 done
-                if [ "${using_fio}" == "1" ]; then
-                    xsb_echo 3 "* Spawning: ${fio_path} --minimal ${fio_conf}"
-                    ${fio_path} --minimal ${fio_conf} | awk -F';' '{print $6}' 1>/tmp/fio-output.dat 2>&1 &
-                    pid_list[${pididx}]=$!
-                    ((pididx++))
-                fi
+                xsb_echo 3 "* Spawning: ${fio_path} --minimal ${fio_conf}"
+                ${fio_path} --minimal ${fio_conf} | awk -F';' '{print $6}' 1>/tmp/fio-output.dat 2>&1 &
+                pid_list[${pididx}]=$!
+                ((pididx++))
 
                 xsb_echo 1 "Waiting for benchmarks to finish..."
 
@@ -512,18 +496,11 @@ _EOF_
                 fioline=1
                 for ((subvmidx=1; subvmidx<=${vmidx}; subvmidx++)); do
                     subvmidxf=$(printf "%02d" ${subvmidx})
-                    if [ "${using_fio}" == "1" ]; then
-                        for device in ${devices[$subvmidx]}; do
-                            fioval=$(head -n ${fioline} /tmp/fio-output.dat | tail -1)
-                            echo ${fioval} >> ${data_raw}/${vmidxf}/${data_run}.${op}.${blkszf}.${subvmidxf}.dat
-                            ((fioline++))
-                        done
-                    else
-                        for datafile in ${data_raw}/${vmidxf}/${data_run}.${op}.${blkszf}.${subvmidxf}.*.dat; do
-                            cat ${datafile} >> ${data_raw}/${vmidxf}/${data_run}.${op}.${blkszf}.${subvmidxf}.dat
-                            rm -f ${datafile}
-                        done
-                    fi
+                    for device in ${devices[$subvmidx]}; do
+                        fioval=$(head -n ${fioline} /tmp/fio-output.dat | tail -1)
+                        echo ${fioval} >> ${data_raw}/${vmidxf}/${data_run}.${op}.${blkszf}.${subvmidxf}.dat
+                        ((fioline++))
+                    done
                 done
             done
         done
@@ -585,12 +562,8 @@ iptables -F INPUT
                     mkdir -p "${data_raw}/${vmidxf}" 2>/dev/null
                     xsb_echo 2 "* Fetching results ${idxf} from ${slave}"
                     scp -i "${xsbench_key}" -o StrictHostKeyChecking=no root@${slave}:/tmp/synexec.out /tmp/vm-output.out 1>/dev/null 2>&1
-                    if [ "${using_fio}" == "1" ]; then
-                        awk -F';' '{print $6+$47}' /tmp/vm-output.out > ${data_raw}/${vmidxf}/${data_run}.${op}.${blkszf}.${idxf}.dat
-                        rm -f /tmp/vm-output.out
-                    else
-                        mv /tmp/vm-output.out ${data_raw}/${vmidxf}/${data_run}.${op}.${blkszf}.${idxf}.dat
-                    fi
+                    awk -F';' '{print $6+$47}' /tmp/vm-output.out > ${data_raw}/${vmidxf}/${data_run}.${op}.${blkszf}.${idxf}.dat
+                    rm -f /tmp/vm-output.out
                     ((idx++))
                 done
                 rm -f "${bench_outp}" "${bench_conf}"
@@ -742,51 +715,6 @@ validate_build_tools(){
         ok_gcc=$?
         if [ ${ok_make} -ne 0 ] || [ ${ok_gcc} -ne 0 ]; then
             xsb_echo 0 "Unable to install 'make' and 'gcc'"
-            return 1
-        fi
-    fi
-
-    return 0
-}
-
-validate_latency(){
-    # Ensure ${latency} is set
-    validate_str latency || return 1
-
-    # Ensure binary exists
-    if [ ! -x "${latency}" ]; then
-        validate_build_tools || return 1
-
-        # Download latency master package from github
-        xsb_echo 3 "Latency not found at \"${latency}\". Downloading from master repo..."
-        validate_str latency_repo || return 1
-
-        wget -q -O latency-master.zip ${latency_repo}
-        if [ $? -ne 0 ] || [ ! -f "latency-master.zip" ]; then
-            xsb_echo 0 "Error downloading latency package from ${latency_repo}"
-            return 1
-        fi
-
-        # Unzip latency package
-        xsb_echo 2 "Unzipping latency package..."
-        unzip -qq latency-master.zip
-        if [ $? -ne 0 ]; then
-            xsb_echo 0 "Unable to unzip latency-master.zip"
-            return 1
-        fi
-
-        # Compile latency
-        cd latency-master
-        make -s -f Makefile 1>/dev/null 2>/dev/null
-        if [ -x "latency" ]; then
-            mv latency ${latency}
-        fi
-        cd - >/dev/null 2>/dev/null
-        rm -rf latency-master.zip latency-master
-
-        # Test it exists now
-        if [ ! -x "${latency}" ]; then
-            xsb_echo 0 "Unable to compile latency binary"
             return 1
         fi
     fi
@@ -1372,8 +1300,7 @@ bench_new_jobconf(){
     validate_str vdi_list || return 1
 
     # Generate synexec job configuration file
-    if [ "${using_fio}" == "1" ]; then
-        cat << _EOF_ > ${conf}
+    cat << _EOF_ > ${conf}
 /usr/bin/fio --minimal :CONF:
 [global]
 bs=${blksz}
@@ -1384,51 +1311,13 @@ iodepth=1
 runtime=${data_iters}
 time_based
 _EOF_
-        for vdi in ${vdi_list}; do
-            cat << _EOF_ >> ${conf}
+    for vdi in ${vdi_list}; do
+        cat << _EOF_ >> ${conf}
 
 [job-${vdi}]
 filename=/dev/${vdi}
 _EOF_
-        done
-    else
-        [ "${op}" == "w" ] && opc="-w" || opc=""
-        cat << _EOF_ > ${conf}
-/bin/bash :CONF:
-#!/bin/bash
-vdis="${vdi_list}"
-
-# Set schedulers to NOOP
-for vdi in \${vdis}; do
-  echo noop > /sys/block/\${vdi}/queue/scheduler
-done
-
-# Start latency for each disk at the same time
-pididx=0
-for vdi in \${vdis}; do
-  /root/latency/latency -s -t ${opc} -b ${blksz} /dev/\${vdi} ${data_iters} 1>/tmp/latency.\${vdi} 2>&1 &
-  pid[\${pididx}]=\$!
-  ((pididx++))
-done
-
-# Wait for latencies to finish
-for ((idx=0; idx<\${pididx}; idx++)); do
-  wait \${pid[\$idx]}
-done
-
-# Check each latency results
-for vdi in \${vdis}; do
-  val=\$(cat /tmp/latency.\${vdi})
-  re='^[0-9]+$'
-  if [[ "\${val}" =~ \$re ]]; then
-    echo \${val}
-  else
-    echo "Latency failed for op='${op}', blksz='${blksz}', iters=${data_iters}, dev='\${vdi}', val='\${val}'"
-  fi
-done
-_EOF_
-
-    fi
+    done
 
     return 0
 }

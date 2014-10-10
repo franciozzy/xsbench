@@ -60,7 +60,7 @@ Usage
 Known issues and wishlist
 -------------------------
   The "setup" functionality is not yet implemented. You are required to
-  manually configure a base guest, install synexec, iperf, fio and latency.
+  manually configure a base guest, install synexec, iperf and fio.
 
   You are also required to configure the SSH keys.
 
@@ -72,9 +72,6 @@ Known issues and wishlist
 
   The implementation of "vbd_create()" could be better. Currently, it must be
   ran on halted guests.
-
-  We are almost in a position to use 'fio' on all tests instead of 'latency'.
-  The support for 'latency' could soon be dropped.
 
   Some functions will only work if the device name in the guest is "xvd_".
   This is incompatible with HVM Linux guests (device is called "hd_").
