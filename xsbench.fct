@@ -275,7 +275,7 @@ qdisk_plug(){
     local sr_uuid
     local vbd_uuid backtype
 
-    # Ensure ${storage} is set
+    # Ensure required configuration is set
     validate_str storage || return 1
 
     # Ensure VMs are running
@@ -552,6 +552,9 @@ iptables -F INPUT
 
     # Ensure we have synexec_master
     validate_synexec_master || return 1
+    validate_int vmi || return 1
+    validate_int vms || return 1
+    validate_int vmi_mod || return 1
 
     # Ensure clones are started
     clones_start || return 1
@@ -562,6 +565,8 @@ iptables -F INPUT
 
     # Run the benchmark
     for ((vmidx=${vmi}; vmidx<=${vms}; vmidx++)); do
+        [ ${vmidx} -ne ${vmi} ] && [ $[ ${vmidx} % ${vmi_mod} ] -ne 0 ] && continue
+
         vmidxf="$(printf "%02d" ${vmidx})"
 
         for blksz in ${data_blkszs}; do
@@ -597,7 +602,7 @@ iptables -F INPUT
     done
 
     # Process the data
-    bench_proc_data
+    bench_proc_data || return 1
 }
 
 #########
