@@ -223,9 +223,6 @@ vbds_create(){
     # Ensure SRs exist
     srs_create || return 1
 
-    # Ensure clones are not running
-    clones_shutdown || return 1
-
     # Loop through clones, creating VBDs accordingly
     errors=0
     nfs_errors=
@@ -1160,6 +1157,11 @@ vbds_create_for_vm(){
 
 # XXX: Hack to use blkback+blktap2+tapdisk2 instead
 #xe vbd-param-set uuid="${vbd_uuid}" other-config:backend-kind=vbd
+
+    # Plug VBD if clone is running
+    validate_vm_pwr "${vm_uuid}" "running" "noerr" && \
+        xe vbd-plug uuid="${vbd_uuid}" && \
+        xsb_echo 2 "* Plugged VBD ${vbd_uuid}"
 }
 
 nfs_vbds_create(){
