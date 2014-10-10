@@ -582,7 +582,7 @@ iptables -F INPUT
                 # Run benchmark for this configuration
                 bench_outp="xsbench.output.$$"
                 idx=1
-                ${synexec_master} "${synexec_master_extra}" -s "${synexec_session}" "${vmidx}" "${bench_conf}" > "${bench_outp}"
+                ${synexec_master} ${synexec_master_extra} -s "${synexec_session}" "${vmidx}" "${bench_conf}" > "${bench_outp}"
                 cat "${bench_outp}" | awk -F' |:' '/^Slave / {print $2}' | while read slave; do
                     idxf="$(printf "%02d" ${idx})"
                     mkdir -p "${data_raw}/${vmidxf}" 2>/dev/null
