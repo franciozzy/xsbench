@@ -481,7 +481,7 @@ _EOF_
                     done
                 done
                 xsb_echo 3 "* Spawning: ${fio_path} --minimal ${fio_conf}"
-                ${fio_path} --minimal ${fio_conf} | awk -F';' '{print $6}' 1>/tmp/fio-output.dat 2>&1 &
+                ${fio_path} --minimal ${fio_conf} | awk -F';' '{print $6+$47}' 1>/tmp/fio-output.dat 2>&1 &
                 pid_list[${pididx}]=$!
                 ((pididx++))
 
