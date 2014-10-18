@@ -409,14 +409,12 @@ dom0_bench_run(){
     local vmidx vmidxf subvmidx subvmidxf
     local blksz blkszf op
     local fio_conf fioline
-    local pididx pididxf pid_list
     local jobidx jobidxf
 
-    # Ensure ${storage} is set
+    # Ensure we have what we need
     validate_str storage || return 1
-
-    # Ensure ${vms} and ${vmi} are set
     validate_vms || return 1
+    validate_int vmi_mod || return 1
 
     # We have only implemented block-storage benchmark
     if [ "${storage}" == "nfs" ] || [ "${storage}" == "all" ]; then
@@ -440,6 +438,7 @@ dom0_bench_run(){
 
     # Run benchmark threads in dom0 simulating VMs
     for ((vmidx=${vmi}; vmidx<=${vms}; vmidx++)); do
+        [ ${vmidx} -ne ${vmi} ] && [ $[ ${vmidx} % ${vmi_mod} ] -ne 0 ] && continue
         vmidxf="$(printf "%02d" ${vmidx})"
         mkdir -p "${data_raw}/${vmidxf}"
 
@@ -462,14 +461,9 @@ runtime=${data_iters}
 time_based
 _EOF_
 
-                pididx=0
                 jobidx=0
                 for ((subvmidx=1; subvmidx<=${vmidx}; subvmidx++)); do
-                    subvmidxf="$(printf "%02d" ${subvmidx})"
-
-                    pid_list[${pididx}]=
                     for device in ${devices[${subvmidx}]}; do
-                        pididxf="$(printf "%02d" $[ ${pididx} + 1 ])"
                         jobidxf="$(printf "%02d" $[ ${jobidx} + 1 ])"
 
                         cat << _EOF_ >> "${fio_conf}"
@@ -480,17 +474,9 @@ _EOF_
                         ((jobidx++))
                     done
                 done
-                xsb_echo 3 "* Spawning: ${fio_path} --minimal ${fio_conf}"
-                ${fio_path} --minimal ${fio_conf} | awk -F';' '{print $6+$47}' 1>/tmp/fio-output.dat 2>&1 &
-                pid_list[${pididx}]=$!
-                ((pididx++))
-
-                xsb_echo 1 "Waiting for benchmarks to finish..."
-
-                # Wait for latencies to finish
-                for ((pididx--; pididx>=0; pididx--)); do
-                    wait ${pid_list[${pididx}]}
-                done
+                xsb_echo 3 "* Running: ${fio_path} --minimal ${fio_conf}"
+                ${fio_path} --minimal ${fio_conf} | awk -F';' '{print $6+$47}' 1>/tmp/fio-output.dat 2>&1
+                rm -f ${fio_conf}
 
                 # Organise data back to single files
                 fioline=1
@@ -524,7 +510,7 @@ iptables -F INPUT
     local bench_conf bench_outp
     local idx idxf
 
-    # Ensure we have synexec_master
+    # Ensure we have what we need
     validate_synexec_master || return 1
     validate_int vmi || return 1
     validate_int vms || return 1
