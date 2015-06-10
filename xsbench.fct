@@ -1301,7 +1301,6 @@ bench_vdi_get_devices(){
     local sr_name
     local vdi_name vdi_uuid
     local vbd_uuid vbd_dev
-    unset vdi_list
 
     # Get input vars
     vm_uuid=$1
