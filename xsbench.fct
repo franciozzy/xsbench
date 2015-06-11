@@ -964,6 +964,7 @@ destroy_vm_dev(){
 
 vdis_create_for_sr(){
     local sr_uuid sr_name
+    local vmidx vmidxf
     local vdiidx vdiidxf
     local vdi_name vdi_uuid
 
@@ -975,17 +976,20 @@ vdis_create_for_sr(){
     validate_str sr_name || return 1
 
     xsb_echo 1 "Creating VDIs for SR \"${sr_name}\" (${sr_uuid})"
-    for ((vdiidx=1; vdiidx<=${vms}; vdiidx++)); do
-        vdiidxf="$(printf "%02d" ${vdiidx})"
-        vdi_name="vdi - ${sr_name} - ${vdiidxf}"
-        vdi_uuid="$(xe vdi-list name-label="${vdi_name}" --minimal)"
-        if [ -z "${vdi_uuid}" ]; then
-            vdi_uuid="$(xe vdi-create sr-uuid=${sr_uuid} sm-config:type=raw \
-                        virtual-size=10GiB name-label="${vdi_name}" type=user)"
-            validate_str vdi_uuid || return 1
+    for ((vmidx=1; vmidx<=${vms}; vmidx++)); do
+        vmidxf="$(printf "%02d" ${vmidx})"
+        for ((vdiidx=1; vdiidx<=${vdis_per_vm}; vdiidx++)); do
+            vdiidxf="$(printf "%02d" ${vdiidx})"
+            vdi_name="vdi - ${sr_name} - ${vmidxf} - ${vdiidxf}"
+            vdi_uuid="$(xe vdi-list name-label="${vdi_name}" --minimal)"
+            if [ -z "${vdi_uuid}" ]; then
+                vdi_uuid="$(xe vdi-create sr-uuid=${sr_uuid} sm-config:type=raw \
+                            virtual-size=${vdi_size} name-label="${vdi_name}" type=user)"
+                validate_str vdi_uuid || return 1
 
-            xsb_echo 2 "* Created VDI \"${vdi_name}\" (${vdi_uuid})"
-        fi
+                xsb_echo 2 "* Created VDI \"${vdi_name}\" (${vdi_uuid})"
+            fi
+        done
     done
 }
 
@@ -1139,6 +1143,7 @@ ext_srs_destroy(){
 
 vbds_create_for_vm(){
     local vmidx vmidxf
+    local vdiidx vdiidxf
     local sr_uuid sr_name
     local vm_uuid
     local vdi_uuid vdi_name
@@ -1155,20 +1160,26 @@ vbds_create_for_vm(){
     sr_name="$(xe sr-list uuid=${sr_uuid} params=name-label --minimal)"
     validate_str sr_name || return 1
     vmidxf="$(printf "%02d" ${vmidx})"
+    devidx="$(xe vbd-list vm-uuid=${vm_uuid} --minimal | awk -F',' '{print NF}')"
 
-    vdi_name="vdi - ${sr_name} - ${vmidxf}"
-    vdi_uuid="$(xe vdi-list name-label="${vdi_name}" --minimal)"
-    vbd_uuid="$(xe vbd-create vdi-uuid="${vdi_uuid}" vm-uuid="${vm_uuid}" \
-                device=autodetect)"
-    xsb_echo 2 "* Created VBD ${vbd_uuid}"
+    for ((vdiidx=1; vdiidx<=${vdis_per_vm}; vdiidx++)); do
+        vdiidxf="$(printf "%02d" ${vdiidx})"
+        ((devidx++))
+        vdi_name="vdi - ${sr_name} - ${vmidxf} - ${vdiidxf}"
+        vdi_uuid="$(xe vdi-list name-label="${vdi_name}" --minimal)"
+        vbd_uuid="$(xe vbd-create vdi-uuid="${vdi_uuid}" vm-uuid="${vm_uuid}" \
+                    device=${devidx})"
+        xsb_echo 2 "* Created VBD ${vbd_uuid}"
 
 # XXX: Hack to use blkback+blktap2+tapdisk2 instead
 #xe vbd-param-set uuid="${vbd_uuid}" other-config:backend-kind=vbd
 
-    # Plug VBD if clone is running
-    validate_vm_pwr "${vm_uuid}" "running" "noerr" && \
-        xe vbd-plug uuid="${vbd_uuid}" && \
-        xsb_echo 2 "* Plugged VBD ${vbd_uuid}"
+        # Plug VBD if clone is running
+        validate_vm_pwr "${vm_uuid}" "running" "noerr" && \
+            xe vbd-plug uuid="${vbd_uuid}" && \
+            xsb_echo 2 "* Plugged VBD ${vbd_uuid}"
+
+    done
 }
 
 nfs_vbds_create(){
@@ -1301,6 +1312,7 @@ bench_vdi_get_devices(){
     local sr_name
     local vdi_name vdi_uuid
     local vbd_uuid vbd_dev
+    local vdiidx vdiidxf
 
     # Get input vars
     vm_uuid=$1
@@ -1308,20 +1320,24 @@ bench_vdi_get_devices(){
     validate_str vm_uuid || return 1
     validate_str sr_name || return 1
 
-    vdi_name="vdi - ${sr_name} - 01"
-    vdi_uuid="$(xe vdi-list name-label="${vdi_name}" --minimal)"
-    validate_str vdi_uuid || return 1
+    for ((vdiidx=1; vdiidx<=${vdis_per_vm}; vdiidx++)); do
+        vdiidxf=$(printf "%02d" ${vdiidx})
 
-    # NOTE: The below could be done in a single step, but because this is error
-    #       prone (e.g. 'device' might not be set in the VBD), it is better to
-    #       do it in two steps to clarify the error if something went wrong
-    vbd_uuid=$(xe vbd-list vm-uuid="${vm_uuid}" vdi-uuid="${vdi_uuid}" --minimal)
-    validate_str vbd_uuid || return 1
+        vdi_name="vdi - ${sr_name} - 01 - ${vdiidxf}"
+        vdi_uuid="$(xe vdi-list name-label="${vdi_name}" --minimal)"
+        validate_str vdi_uuid || return 1
 
-    vbd_dev=$(xe vbd-list uuid="${vbd_uuid}" params=device --minimal)
-    validate_str vbd_dev || return 1
+        # NOTE: The below could be done in a single step, but because this is error
+        #       prone (e.g. 'device' might not be set in the VBD), it is better to
+        #       do it in two steps to clarify the error if something went wrong
+        vbd_uuid=$(xe vbd-list vm-uuid="${vm_uuid}" vdi-uuid="${vdi_uuid}" --minimal)
+        validate_str vbd_uuid || return 1
 
-    vdi_list="${vdi_list} ${vbd_dev}"
+        vbd_dev=$(xe vbd-list uuid="${vbd_uuid}" params=device --minimal)
+        validate_str vbd_dev || return 1
+
+        vdi_list="${vdi_list} ${vbd_dev}"
+    done
 
     return 0
 }
@@ -1376,6 +1392,7 @@ bench_dev_list(){
     local lvmidx
     local sr_name sr_uuid
     local vmidx vmidxf
+    local vdiidx vdiidxf
     unset devices
 
     # Validate global vars
@@ -1387,9 +1404,12 @@ bench_dev_list(){
         sr_uuid="$(xe sr-list name-label="${sr_name}" --minimal)"
         for ((vmidx=1; vmidx<=${vms}; vmidx++)); do
             vmidxf="$(printf "%02d" ${vmidx})"
-            vdi_name="vdi - ${sr_name} - ${vmidxf}"
-            vdi_uuid="$(xe vdi-list name-label="${vdi_name}" --minimal)"
-            devices[${vmidx}]="${devices[$vmidx]} /dev/VG_XenStorage-${sr_uuid}/LV-${vdi_uuid}"
+            for ((vdiidx=1; vdiidx<=${vdis_per_vm}; vdiidx++)); do
+                vdiidxf=$(printf "%02d" ${vdiidx})
+                vdi_name="vdi - ${sr_name} - ${vmidxf} - ${vdiidxf}"
+                vdi_uuid="$(xe vdi-list name-label="${vdi_name}" --minimal)"
+                devices[${vmidx}]="${devices[$vmidx]} /dev/VG_XenStorage-${sr_uuid}/LV-${vdi_uuid}"
+            done
         done
     done
 }
@@ -1501,6 +1521,7 @@ dom0_deactivate_vdi(){
 dom0_activate_vdis(){
     local lvmidx
     local sr_name sr_uuid
+    local vmidx vmidxf
     local vdiidx vdiidxf
     local vdi_name vdi_uuid
 
@@ -1516,12 +1537,15 @@ dom0_activate_vdis(){
         sr_uuid="$(xe sr-list name-label="${sr_name}" --minimal)"
         validate_str sr_uuid || return 1
 
-        for ((vdiidx=1; vdiidx<=${vms}; vdiidx++)); do
-            vdiidxf="$(printf "%02d" ${vdiidx})"
-            vdi_name="vdi - ${sr_name} - ${vdiidxf}"
-            vdi_uuid="$(xe vdi-list name-label="${vdi_name}" --minimal)"
-            validate_str vdi_uuid || return 1
-            dom0_activate_vdi "${sr_uuid}" "${vdi_uuid}"
+        for ((vmidx=1; vmidx<=${vms}; vmidx++)); do
+            vmidxf=$(printf "%02d" ${vmidx})
+            for ((vdiidx=1; vdiidx<=${vdis_per_vm}; vdiidx++)); do
+                vdiidxf="$(printf "%02d" ${vdiidx})"
+                vdi_name="vdi - ${sr_name} - ${vmidxf} - ${vdiidxf}"
+                vdi_uuid="$(xe vdi-list name-label="${vdi_name}" --minimal)"
+                validate_str vdi_uuid || return 1
+                dom0_activate_vdi "${sr_uuid}" "${vdi_uuid}"
+            done
         done
     done
 
@@ -1531,6 +1555,7 @@ dom0_activate_vdis(){
 dom0_deactivate_vdis(){
     local lvmidx
     local sr_name sr_uuid
+    local vmidx vmidxf
     local vdiidx vdiidxf
     local vdi_name vdi_uuid vdi_path
 
@@ -1542,12 +1567,15 @@ dom0_deactivate_vdis(){
         sr_uuid=$(xe sr-list name-label="${sr_name}" --minimal)
         validate_str sr_uuid || return 1
 
-        for ((vdiidx=1; vdiidx<=${vms}; vdiidx++)); do
-            vdiidxf=$(printf "%02d" ${vdiidx})
-            vdi_name="vdi - ${sr_name} - ${vdiidxf}"
-            vdi_uuid=$(xe vdi-list name-label="${vdi_name}" --minimal)
-            validate_str vdi_uuid || return 1
-            dom0_deactivate_vdi "${sr_uuid}" "${vdi_uuid}"
+        for ((vmidx=1; vmidx<=${vms}; vmidx++)); do
+            vmidxf=$(printf "%02d" ${vmidx})
+            for ((vdiidx=1; vdiidx<=${vdis_per_vm}; vdiidx++)); do
+                vdiidxf=$(printf "%02d" ${vdiidx})
+                vdi_name="vdi - ${sr_name} - ${vmidxf} - ${vdiidxf}"
+                vdi_uuid=$(xe vdi-list name-label="${vdi_name}" --minimal)
+                validate_str vdi_uuid || return 1
+                dom0_deactivate_vdi "${sr_uuid}" "${vdi_uuid}"
+            done
         done
     done
 
